@@ -3,6 +3,7 @@
 
 #include "crow_all.h"
 #include "json.hpp"
+//#include "serVivo.hpp"
 #include <random>
 
 using namespace std;
@@ -17,6 +18,8 @@ const uint32_t MAXIMUM_ENERGY = 200;
 const uint32_t THRESHOLD_ENERGY_FOR_REPRODUCTION = 20;
 const uint32_t HERBIVORE_START_ENERGY = 100;
 const uint32_t CARNIVORE_START_ENERGY = 100;
+const uint32_t ENERGY_FROM_PLANT = 30;
+const uint32_t ENERGY_FROM_HERBIVORE = 20;
 
 // Probabilities
 const double PLANT_REPRODUCTION_PROBABILITY = 0.2;
@@ -26,6 +29,8 @@ const double HERBIVORE_MOVE_PROBABILITY = 0.7;
 const double HERBIVORE_EAT_PROBABILITY = 0.9;
 const double CARNIVORE_MOVE_PROBABILITY = 0.5;
 const double CARNIVORE_EAT_PROBABILITY = 1.0;
+
+int novaIteracao = 0;
 
 // Type definitions
 enum entity_type_t
@@ -49,6 +54,15 @@ struct entity_t
     int32_t age;
 };
 
+    static pos_t tentarMover(pos_t posicao, entity_type_t tipo);
+    static bool tentarReproduzir(pos_t posicao, entity_type_t tipo);
+    static bool tentarComer(pos_t posicao, entity_type_t tipo);
+    static bool morrer(pos_t posicao, entity_type_t tipo);
+    static void novaPlanta(pos_t posicao);
+    static void novoHerbivoro(pos_t posicao);
+    static void novoCarnivoro(pos_t posicao);
+    static bool criarVida(entity_type_t tipo);
+
 // Auxiliary code to convert the entity_type_t enum to a string
 NLOHMANN_JSON_SERIALIZE_ENUM(entity_type_t, {
                                                 {emptyy, " "},
@@ -66,20 +80,301 @@ namespace nlohmann
     }
 }
 
+bool random_action(float probability) {
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    std::uniform_real_distribution<> dis(0.0, 1.0);
+    return dis(gen) < probability;
+}
+
 // Grid that contains the entities
 static std::vector<std::vector<entity_t>> entity_grid;
 mutex mtx;
 
-void novaPlanta(pos_t posicao_planta){
+
+static pos_t tentarMover(pos_t posicao, entity_type_t tipo){
+    vector<pos_t> posicoes_possiveis;
+    pos_t direita = {posicao.i, posicao.j + 1};
+    pos_t esquerda = {posicao.i, posicao.j - 1};
+    pos_t cima = {posicao.i - 1, posicao.j};
+    pos_t baixo = {posicao.i + 1, posicao.j};
+
+    mtx.lock();
+
+    if(direita.j < NUM_ROWS){ 
+        if(entity_grid[direita.i][direita.j].type == emptyy)
+            posicoes_possiveis.push_back(direita);
+    }
+
+    if(esquerda.j >= 0){
+        if(entity_grid[esquerda.i][esquerda.j].type == emptyy)
+            posicoes_possiveis.push_back(esquerda);
+    }
+
+    if(cima.i >= 0){
+        if(entity_grid[cima.i][cima.j].type == emptyy)
+            posicoes_possiveis.push_back(cima);
+    }
+
+    if(baixo.i < NUM_ROWS){
+        if(entity_grid[baixo.i][baixo.j].type == emptyy)
+            posicoes_possiveis.push_back(baixo);
+    }
+
+    if(posicoes_possiveis.size() > 0){
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<> dis(0, posicoes_possiveis.size() - 1);
+        int escolhida = dis(gen);
+        pos_t posicao_escolhida = posicoes_possiveis[escolhida];
+
+        if(tipo == herbivore){
+            if(random_action(HERBIVORE_MOVE_PROBABILITY)){
+                entity_grid[posicao_escolhida.i][posicao_escolhida.j] = entity_grid[posicao.i][posicao.j];
+                entity_grid[posicao.i][posicao.j] = {emptyy, 0, 0};
+                mtx.unlock();
+                return posicao_escolhida;
+            }
+        }
+
+        if(tipo == carnivore){
+            if(random_action(CARNIVORE_MOVE_PROBABILITY)){
+                entity_grid[posicao_escolhida.i][posicao_escolhida.j] = entity_grid[posicao.i][posicao.j];
+                entity_grid[posicao.i][posicao.j] = {emptyy, 0, 0};
+                mtx.unlock();
+                return posicao_escolhida;
+            }
+        }
+    }
+
+    return posicao;
 }
 
-void novoHerbivoro(pos_t posicao_herbivoro){
+static bool tentarComer(pos_t posicao, entity_type_t tipo){
+    vector<pos_t> posicoes_possiveis;
+    pos_t direita = {posicao.i, posicao.j + 1};
+    pos_t esquerda = {posicao.i, posicao.j - 1};
+    pos_t cima = {posicao.i - 1, posicao.j};
+    pos_t baixo = {posicao.i + 1, posicao.j};
+
+    mtx.lock();
+
+    if(direita.j < NUM_ROWS){ 
+        if((tipo == herbivore && entity_grid[direita.i][direita.j].type == plant) ||
+        (tipo == carnivore && entity_grid[direita.i][direita.j].type == herbivore))
+            posicoes_possiveis.push_back(direita);
+    }
+
+    if(esquerda.j >= 0){
+        if((tipo == herbivore && entity_grid[esquerda.i][esquerda.j].type == plant) ||
+        (tipo == carnivore && entity_grid[esquerda.i][esquerda.j].type == herbivore))
+            posicoes_possiveis.push_back(esquerda);
+    }
+
+    if(cima.i >= 0){
+        if((tipo == herbivore && entity_grid[cima.i][cima.j].type == plant) ||
+        (tipo == carnivore && entity_grid[cima.i][cima.j].type == herbivore))
+            posicoes_possiveis.push_back(cima);
+    }
+
+    if(baixo.i < NUM_ROWS){
+        if((tipo == herbivore && entity_grid[baixo.i][baixo.j].type == plant) ||
+        (tipo == carnivore && entity_grid[baixo.i][baixo.j].type == herbivore))
+            posicoes_possiveis.push_back(baixo);
+    }
+
+    if(posicoes_possiveis.size() > 0){
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::uniform_int_distribution<> dis(0, posicoes_possiveis.size() - 1);
+        int escolhida = dis(gen);
+        pos_t posicao_escolhida = posicoes_possiveis[escolhida];
+
+        if(tipo == herbivore ){
+            if(random_action(HERBIVORE_EAT_PROBABILITY)){
+                entity_grid[posicao_escolhida.i][posicao_escolhida.j] = {emptyy, 0, 0};
+                entity_grid[posicao.i][posicao.j].energy += ENERGY_FROM_PLANT;
+                mtx.unlock();
+                return true;
+            }
+        }
+
+        if(tipo == carnivore){
+            if(random_action(CARNIVORE_EAT_PROBABILITY)){
+                entity_grid[posicao_escolhida.i][posicao_escolhida.j] = {emptyy, 0, 0};
+                entity_grid[posicao.i][posicao.j].energy += ENERGY_FROM_HERBIVORE;
+                mtx.unlock();
+                return true;
+            }
+        }
+    }
+    
+    mtx.unlock();
+    return false;
 }
 
-void novoCarnivoro(pos_t posicao_carnivoro){
+static bool tentarReproduzir(pos_t posicao, entity_type_t tipo)
+{
+    pos_t posicao_escolhida;
+
+    vector<pos_t> posicoes_possiveis;
+    pos_t direita = {posicao.i, posicao.j + 1};
+    pos_t esquerda = {posicao.i, posicao.j - 1};
+    pos_t cima = {posicao.i - 1, posicao.j};
+    pos_t baixo = {posicao.i + 1, posicao.j};
+
+    mtx.lock();
+    if(direita.j < NUM_ROWS){ 
+        if(entity_grid[direita.i][direita.j].type == emptyy)
+            posicoes_possiveis.push_back(direita);
+    }
+
+    if(esquerda.j >= 0){
+        if(entity_grid[esquerda.i][esquerda.j].type == emptyy)
+            posicoes_possiveis.push_back(esquerda);
+    }
+
+    if(cima.i >= 0){
+        if(entity_grid[cima.i][cima.j].type == emptyy)
+            posicoes_possiveis.push_back(cima);
+    }
+
+    if(baixo.i < NUM_ROWS){
+        if(entity_grid[baixo.i][baixo.j].type == emptyy)
+            posicoes_possiveis.push_back(baixo);
+    }
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(0, posicoes_possiveis.size() - 1);
+    int escolhida = dis(gen);
+    posicao_escolhida = posicoes_possiveis[escolhida];
+
+    if(tipo == plant){
+        if(random_action(PLANT_REPRODUCTION_PROBABILITY)){
+            entity_grid[posicao_escolhida.i][posicao_escolhida.j] = {plant, 0, 0};
+            thread t1(novaPlanta, posicao_escolhida);
+            t1.detach();
+            mtx.unlock();
+            return true;
+        }
+    }
+    if(tipo == herbivore && entity_grid[posicao.i][posicao.j].energy >= THRESHOLD_ENERGY_FOR_REPRODUCTION){
+        if(random_action(HERBIVORE_REPRODUCTION_PROBABILITY)){
+            entity_grid[posicao_escolhida.i][posicao_escolhida.j] = {herbivore, HERBIVORE_START_ENERGY, 0};
+            thread t1(novoHerbivoro, posicao_escolhida);
+            t1.detach();
+            entity_grid[posicao.i][posicao.j].energy -= THRESHOLD_ENERGY_FOR_REPRODUCTION;
+            mtx.unlock();
+            return true;
+        }
+    }
+    if(tipo == carnivore && entity_grid[posicao.i][posicao.j].energy >= THRESHOLD_ENERGY_FOR_REPRODUCTION){
+        if(random_action(CARNIVORE_REPRODUCTION_PROBABILITY)){
+            entity_grid[posicao_escolhida.i][posicao_escolhida.j] = {carnivore, CARNIVORE_START_ENERGY, 0};
+            thread t1(novoCarnivoro, posicao_escolhida);
+            t1.detach();
+            entity_grid[posicao.i][posicao.j].energy -= THRESHOLD_ENERGY_FOR_REPRODUCTION;
+            mtx.unlock();
+            return true;
+        }
+    }
+    
+    mtx.unlock();
+    return false;
 }
 
-bool criarVida(entity_type_t tipo){
+static bool morrer(pos_t posicao){
+    if(entity_grid[posicao.i][posicao.j].type == plant){
+        if(entity_grid[posicao.i][posicao.j].age >= PLANT_MAXIMUM_AGE){
+            entity_grid[posicao.i][posicao.j] = {emptyy, 0, 0};
+            return true;
+        }
+    }
+
+    if(entity_grid[posicao.i][posicao.j].type == herbivore){
+        if(entity_grid[posicao.i][posicao.j].age >= HERBIVORE_MAXIMUM_AGE){
+            entity_grid[posicao.i][posicao.j] = {emptyy, 0, 0};
+            return true;
+        }
+        if(entity_grid[posicao.i][posicao.j].energy <= 0){
+            entity_grid[posicao.i][posicao.j] = {emptyy, 0, 0};
+            return true;
+        }
+    }
+
+    if(entity_grid[posicao.i][posicao.j].type == carnivore){
+        if(entity_grid[posicao.i][posicao.j].age >= CARNIVORE_MAXIMUM_AGE){
+            entity_grid[posicao.i][posicao.j] = {emptyy, 0, 0};
+            return true;
+        }
+        if(entity_grid[posicao.i][posicao.j].energy <= 0){
+            entity_grid[posicao.i][posicao.j] = {emptyy, 0, 0};
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static void novaPlanta(pos_t posicao){
+    bool vivo = true;
+    int iteracao = novaIteracao;
+    while(vivo){
+        if(novaIteracao > iteracao){
+            iteracao++;
+            vivo = entity_grid[posicao.i][posicao.j].type == plant 
+                && !morrer(posicao);
+            if(vivo){
+                entity_grid[posicao.i][posicao.j].age++;
+                tentarReproduzir(posicao, plant);
+            } 
+        }
+    }
+}
+
+static void novoHerbivoro(pos_t posicao){
+    bool vivo = true;
+    int iteracao = novaIteracao;
+    while(vivo){
+        if(novaIteracao > iteracao){
+            iteracao++;
+            vivo = entity_grid[posicao.i][posicao.j].type == herbivore 
+                && !morrer(posicao);
+            if(vivo){
+                entity_grid[posicao.i][posicao.j].age++;
+                tentarComer(posicao, herbivore);
+                tentarReproduzir(posicao, herbivore);
+                pos_t novaPosicao = tentarMover(posicao, herbivore);
+                if(novaPosicao.i != posicao.i || novaPosicao.j != posicao.j){
+                    posicao = novaPosicao;
+                }
+            } 
+        }
+    }
+}
+
+static void novoCarnivoro(pos_t posicao){
+    bool vivo = true;
+    int iteracao = novaIteracao;
+    while(vivo){
+        if(novaIteracao > iteracao){
+            iteracao++;
+            vivo = entity_grid[posicao.i][posicao.j].type == carnivore 
+                && !morrer(posicao);
+            if(vivo){
+                entity_grid[posicao.i][posicao.j].age++;
+                tentarComer(posicao, carnivore);
+                tentarReproduzir(posicao, carnivore);
+                pos_t novaPosicao = tentarMover(posicao, carnivore);
+                if(novaPosicao.i != posicao.i || novaPosicao.j != posicao.j){
+                    posicao = novaPosicao;
+                }
+            } 
+        }
+    }
+}
+
+static bool criarVida(entity_type_t tipo){
     mtx.lock();
 
     if(entity_grid.size() == NUM_ROWS * NUM_ROWS){
@@ -121,7 +416,6 @@ bool criarVida(entity_type_t tipo){
     mtx.unlock();
     return true;    
 }
-
 
 int main()
 {
@@ -194,6 +488,11 @@ int main()
         // Iterate over the entity grid and simulate the behaviour of each entity
         
         // <YOUR CODE HERE>
+        /////////////////////////////////////////////////////////////////////////
+
+        novaIteracao ++;
+
+        /////////////////////////////////////////////////////////////////////////
         
         // Return the JSON representation of the entity grid
         nlohmann::json json_grid = entity_grid; 
